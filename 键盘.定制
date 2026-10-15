@@ -1,0 +1,672 @@
+local Players = game:GetService("Players")
+local UserInputService = game:GetService("UserInputService")
+local player = Players.LocalPlayer
+local playerGui = player:WaitForChild("PlayerGui")
+local VirtualInputManager
+pcall(function()
+    VirtualInputManager = game:GetService("VirtualInputManager")
+end)
+
+local oldGui
+pcall(function()
+    local parent = typeof(gethui) == "function" and gethui() or game:GetService("CoreGui")
+    oldGui = parent:FindFirstChild("TouchKeyboardUI")
+end)
+if oldGui then
+    pcall(function()
+        oldGui:Destroy()
+    end)
+end
+
+local gui = Instance.new("ScreenGui")
+gui.Name = "TouchKeyboardUI"
+gui.ResetOnSpawn = false
+gui.IgnoreGuiInset = true
+gui.DisplayOrder = 9999
+gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+local attached = false
+if typeof(gethui) == "function" then
+    local ok, parent = pcall(gethui)
+    if ok and parent then
+        attached = pcall(function()
+            gui.Parent = parent
+        end)
+    end
+end
+if not attached then
+    local ok, core = pcall(function()
+        return game:GetService("CoreGui")
+    end)
+    if ok and core then
+        attached = pcall(function()
+            gui.Parent = core
+        end)
+    end
+end
+if not attached then
+    gui.Parent = playerGui
+end
+
+local palette = {
+    background = Color3.fromRGB(22, 25, 32),
+    panel = Color3.fromRGB(29, 33, 42),
+    key = Color3.fromRGB(43, 48, 60),
+    keyHover = Color3.fromRGB(56, 64, 79),
+    accent = Color3.fromRGB(83, 153, 255),
+    text = Color3.fromRGB(238, 241, 247),
+    secondary = Color3.fromRGB(151, 160, 177),
+    stroke = Color3.fromRGB(66, 74, 89),
+    locked = Color3.fromRGB(54, 102, 160)
+}
+
+local activeInputs = {}
+local keyCounts = {}
+local currentDrag
+local currentResize
+local shortcutCount = 0
+local mainFrame
+local pickerFrame
+local mainLocked = false
+
+local function sendKey(keyCode, down)
+    if not VirtualInputManager then
+        return
+    end
+    pcall(function()
+        VirtualInputManager:SendKeyEvent(down, keyCode, false, game)
+    end)
+end
+
+local function beginKey(input, keyCode)
+    if activeInputs[input] then
+        return
+    end
+    activeInputs[input] = keyCode
+    local count = keyCounts[keyCode] or 0
+    keyCounts[keyCode] = count + 1
+    if count == 0 then
+        sendKey(keyCode, true)
+    end
+end
+
+local function endKey(input)
+    local keyCode = activeInputs[input]
+    if not keyCode then
+        return
+    end
+    activeInputs[input] = nil
+    local count = math.max(0, (keyCounts[keyCode] or 1) - 1)
+    keyCounts[keyCode] = count
+    if count == 0 then
+        sendKey(keyCode, false)
+    end
+end
+
+local function bindKeyButton(button, keyCode)
+    button.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+            beginKey(input, keyCode)
+        end
+    end)
+    button.InputEnded:Connect(endKey)
+end
+
+local function make(className, properties, parent)
+    local object = Instance.new(className)
+    for key, value in pairs(properties or {}) do
+        object[key] = value
+    end
+    object.Parent = parent
+    return object
+end
+
+local function corner(object, radius)
+    make("UICorner", {CornerRadius = UDim.new(0, radius or 8)}, object)
+end
+
+local function outline(object, color, transparency, thickness)
+    make("UIStroke", {
+        Color = color or palette.stroke,
+        Transparency = transparency or 0,
+        Thickness = thickness or 1
+    }, object)
+end
+
+local function makeButton(parent, text, size, position, color, textSize)
+    local button = make("TextButton", {
+        AutoButtonColor = false,
+        BackgroundColor3 = color or palette.key,
+        BorderSizePixel = 0,
+        Size = size,
+        Position = position,
+        Font = Enum.Font.GothamMedium,
+        Text = text,
+        TextColor3 = palette.text,
+        TextSize = textSize or 13,
+        TextScaled = false,
+        Active = true,
+        Selectable = false
+    }, parent)
+    corner(button, 7)
+    button.MouseEnter:Connect(function()
+        if not button:GetAttribute("Selected") then
+            button.BackgroundColor3 = palette.keyHover
+        end
+    end)
+    button.MouseLeave:Connect(function()
+        button.BackgroundColor3 = button:GetAttribute("Selected") and palette.locked or color or palette.key
+    end)
+    return button
+end
+
+local function getViewport()
+    local camera = workspace.CurrentCamera
+    if camera then
+        return camera.ViewportSize
+    end
+    return Vector2.new(800, 600)
+end
+
+local function bindDrag(zone, frame, lockedFunction)
+    zone.InputBegan:Connect(function(input)
+        if input.UserInputType ~= Enum.UserInputType.MouseButton1 and input.UserInputType ~= Enum.UserInputType.Touch then
+            return
+        end
+        if lockedFunction and lockedFunction() then
+            return
+        end
+        if currentDrag then
+            return
+        end
+        currentDrag = {
+            frame = frame,
+            input = input,
+            startPointer = input.Position,
+            startPosition = frame.Position
+        }
+    end)
+end
+
+local function bindResize(frame, grip, minWidth, minHeight, maxWidthFunction, maxHeightFunction)
+    grip.InputBegan:Connect(function(input)
+        if input.UserInputType ~= Enum.UserInputType.MouseButton1 and input.UserInputType ~= Enum.UserInputType.Touch then
+            return
+        end
+        if currentResize then
+            return
+        end
+        currentResize = {
+            frame = frame,
+            input = input,
+            startPointer = input.Position,
+            startSize = frame.AbsoluteSize,
+            minWidth = minWidth,
+            minHeight = minHeight,
+            maxWidthFunction = maxWidthFunction,
+            maxHeightFunction = maxHeightFunction
+        }
+    end)
+end
+
+UserInputService.InputChanged:Connect(function(input)
+    if currentDrag then
+        local state = currentDrag
+        local matching = (state.input.UserInputType == Enum.UserInputType.Touch and input == state.input)
+            or (state.input.UserInputType == Enum.UserInputType.MouseButton1 and input.UserInputType == Enum.UserInputType.MouseMovement)
+        if matching then
+            local delta = input.Position - state.startPointer
+            state.frame.Position = UDim2.fromOffset(
+                state.startPosition.X.Offset + delta.X,
+                state.startPosition.Y.Offset + delta.Y
+            )
+        end
+    end
+    if currentResize then
+        local state = currentResize
+        local matching = (state.input.UserInputType == Enum.UserInputType.Touch and input == state.input)
+            or (state.input.UserInputType == Enum.UserInputType.MouseButton1 and input.UserInputType == Enum.UserInputType.MouseMovement)
+        if matching then
+            local delta = input.Position - state.startPointer
+            local viewport = getViewport()
+            local maxWidth = math.max(state.minWidth, math.min(state.maxWidthFunction(), viewport.X - 10))
+            local maxHeight = math.max(state.minHeight, math.min(state.maxHeightFunction(), viewport.Y - 10))
+            local width = math.clamp(state.startSize.X + delta.X, state.minWidth, maxWidth)
+            local height = math.clamp(state.startSize.Y + delta.Y, state.minHeight, maxHeight)
+            state.frame.Size = UDim2.fromOffset(width, height)
+        end
+    end
+end)
+
+UserInputService.InputEnded:Connect(function(input)
+    endKey(input)
+    if currentDrag and (input == currentDrag.input or input.UserInputType == Enum.UserInputType.MouseButton1) then
+        currentDrag = nil
+    end
+    if currentResize and (input == currentResize.input or input.UserInputType == Enum.UserInputType.MouseButton1) then
+        currentResize = nil
+    end
+end)
+
+local function addResizeGrip(frame, minWidth, minHeight, maxWidthFunction, maxHeightFunction, zIndex)
+    local grip = make("TextButton", {
+        AutoButtonColor = false,
+        BackgroundColor3 = palette.accent,
+        BackgroundTransparency = 0.08,
+        BorderSizePixel = 0,
+        Size = UDim2.fromOffset(15, 15),
+        Position = UDim2.new(1, -15, 1, -15),
+        Text = "◢",
+        Font = Enum.Font.GothamBold,
+        TextSize = 10,
+        TextColor3 = palette.text,
+        ZIndex = zIndex or 5
+    }, frame)
+    corner(grip, 4)
+    bindResize(frame, grip, minWidth, minHeight, maxWidthFunction, maxHeightFunction)
+    return grip
+end
+
+local function keyCodeFromName(name)
+    local ok, keyCode = pcall(function()
+        return Enum.KeyCode[name]
+    end)
+    if ok then
+        return keyCode
+    end
+    return nil
+end
+
+local function keyDef(text, code, weight)
+    return {text = text, code = code, weight = weight or 1}
+end
+
+local keyRows = {
+    {
+        keyDef("Esc", "Escape", 1.25), keyDef("1", "One"), keyDef("2", "Two"), keyDef("3", "Three"), keyDef("4", "Four"), keyDef("5", "Five"), keyDef("6", "Six"), keyDef("7", "Seven"), keyDef("8", "Eight"), keyDef("9", "Nine"), keyDef("0", "Zero"), keyDef("-", "Minus"), keyDef("=", "Equals"), keyDef("⌫", "Backspace", 1.5)
+    },
+    {
+        keyDef("Tab", "Tab", 1.35), keyDef("Q", "Q"), keyDef("W", "W"), keyDef("E", "E"), keyDef("R", "R"), keyDef("T", "T"), keyDef("Y", "Y"), keyDef("U", "U"), keyDef("I", "I"), keyDef("O", "O"), keyDef("P", "P"), keyDef("[", "LeftBracket"), keyDef("]", "RightBracket"), keyDef("\\", "Backslash", 1.15)
+    },
+    {
+        keyDef("A", "A"), keyDef("S", "S"), keyDef("D", "D"), keyDef("F", "F"), keyDef("G", "G"), keyDef("H", "H"), keyDef("J", "J"), keyDef("K", "K"), keyDef("L", "L"), keyDef(";", "Semicolon"), keyDef("'", "Quote"), keyDef("Enter", "Return", 1.65)
+    },
+    {
+        keyDef("Shift", "LeftShift", 1.7), keyDef("Z", "Z"), keyDef("X", "X"), keyDef("C", "C"), keyDef("V", "V"), keyDef("B", "B"), keyDef("N", "N"), keyDef("M", "M"), keyDef(",", "Comma"), keyDef(".", "Period"), keyDef("/", "Slash"), keyDef("Shift", "RightShift", 1.7)
+    },
+    {
+        keyDef("Ctrl", "LeftControl", 1.25), keyDef("Alt", "LeftAlt", 1.1), keyDef("Space", "Space", 4.6), keyDef("Alt", "RightAlt", 1.1), keyDef("Ctrl", "RightControl", 1.25), keyDef("←", "Left"), keyDef("↓", "Down"), keyDef("↑", "Up"), keyDef("→", "Right")
+    }
+}
+
+local viewport = getViewport()
+local initialWidth = math.max(320, math.min(390, viewport.X - 16))
+local initialHeight = math.min(310, math.max(280, viewport.Y - 32))
+mainFrame = make("Frame", {
+    Name = "MainKeyboard",
+    BackgroundColor3 = palette.background,
+    BorderSizePixel = 0,
+    Size = UDim2.fromOffset(initialWidth, initialHeight),
+    Position = UDim2.fromOffset(math.max(8, (viewport.X - initialWidth) / 2), math.max(8, viewport.Y - initialHeight - 20)),
+    Active = true,
+    ZIndex = 1
+}, gui)
+corner(mainFrame, 12)
+outline(mainFrame, palette.stroke, 0.12, 1)
+
+local header = make("Frame", {
+    Name = "Header",
+    BackgroundColor3 = palette.panel,
+    BorderSizePixel = 0,
+    Size = UDim2.new(1, 0, 0, 36),
+    ZIndex = 2
+}, mainFrame)
+corner(header, 10)
+make("Frame", {
+    BackgroundColor3 = palette.panel,
+    BorderSizePixel = 0,
+    Position = UDim2.new(0, 0, 1, -8),
+    Size = UDim2.new(1, 0, 0, 8),
+    ZIndex = 2
+}, header)
+
+local titleZone = make("TextLabel", {
+    BackgroundTransparency = 1,
+    Position = UDim2.fromOffset(11, 0),
+    Size = UDim2.new(1, -119, 1, 0),
+    Font = Enum.Font.GothamBold,
+    Text = "TOUCH KEYS",
+    TextColor3 = palette.text,
+    TextSize = 12,
+    TextXAlignment = Enum.TextXAlignment.Left,
+    ZIndex = 3
+}, header)
+bindDrag(titleZone, mainFrame, function()
+    return mainLocked
+end)
+
+local mainLockButton = makeButton(header, "固定", UDim2.fromOffset(48, 25), UDim2.new(1, -83, 0, 5), palette.key, 11)
+mainLockButton.ZIndex = 4
+local closeButton = makeButton(header, "×", UDim2.fromOffset(27, 25), UDim2.new(1, -31, 0, 5), palette.key, 16)
+closeButton.ZIndex = 4
+mainLockButton.Activated:Connect(function()
+    mainLocked = not mainLocked
+    mainLockButton.Text = mainLocked and "已固定" or "固定"
+    mainLockButton:SetAttribute("Selected", mainLocked)
+    mainLockButton.BackgroundColor3 = mainLocked and palette.locked or palette.key
+end)
+closeButton.Activated:Connect(function()
+    gui:Destroy()
+end)
+
+local keyboardArea = make("Frame", {
+    Name = "Keys",
+    BackgroundTransparency = 1,
+    Position = UDim2.fromOffset(8, 42),
+    Size = UDim2.new(1, -16, 1, -81),
+    ZIndex = 2
+}, mainFrame)
+make("UIListLayout", {
+    FillDirection = Enum.FillDirection.Vertical,
+    HorizontalAlignment = Enum.HorizontalAlignment.Center,
+    VerticalAlignment = Enum.VerticalAlignment.Center,
+    SortOrder = Enum.SortOrder.LayoutOrder,
+    Padding = UDim.new(0, 4)
+}, keyboardArea)
+
+for rowIndex, row in ipairs(keyRows) do
+    local rowFrame = make("Frame", {
+        Name = "Row" .. rowIndex,
+        BackgroundTransparency = 1,
+        Size = UDim2.new(1, 0, 1 / #keyRows, -((#keyRows - 1) * 4 / #keyRows)),
+        LayoutOrder = rowIndex,
+        ZIndex = 2
+    }, keyboardArea)
+    make("UIListLayout", {
+        FillDirection = Enum.FillDirection.Horizontal,
+        HorizontalAlignment = Enum.HorizontalAlignment.Center,
+        VerticalAlignment = Enum.VerticalAlignment.Center,
+        SortOrder = Enum.SortOrder.LayoutOrder,
+        Padding = UDim.new(0, 3)
+    }, rowFrame)
+    local totalWeight = 0
+    for _, spec in ipairs(row) do
+        totalWeight = totalWeight + spec.weight
+    end
+    for index, spec in ipairs(row) do
+        local code = keyCodeFromName(spec.code)
+        if code then
+            local button = make("TextButton", {
+                Name = "Key_" .. spec.code,
+                AutoButtonColor = false,
+                BackgroundColor3 = palette.key,
+                BorderSizePixel = 0,
+                Size = UDim2.new(spec.weight / totalWeight, -((#row - 1) * 3 * spec.weight / totalWeight), 1, 0),
+                Font = Enum.Font.GothamMedium,
+                Text = spec.text,
+                TextColor3 = palette.text,
+                TextScaled = true,
+                TextSize = 13,
+                Active = true,
+                Selectable = false,
+                LayoutOrder = index,
+                ZIndex = 3
+            }, rowFrame)
+            make("UITextSizeConstraint", {MinTextSize = 9, MaxTextSize = 14}, button)
+            corner(button, 6)
+            bindKeyButton(button, code)
+            button.InputBegan:Connect(function(input)
+                if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+                    button.BackgroundColor3 = palette.accent
+                end
+            end)
+            button.InputEnded:Connect(function()
+                button.BackgroundColor3 = palette.key
+            end)
+        end
+    end
+end
+
+local footerHint = make("TextLabel", {
+    BackgroundTransparency = 1,
+    Position = UDim2.new(0, 10, 1, -30),
+    Size = UDim2.new(1, -145, 0, 22),
+    Font = Enum.Font.Gotham,
+    Text = "按住持续触发 · 拖标题栏移动",
+    TextColor3 = palette.secondary,
+    TextSize = 9,
+    TextXAlignment = Enum.TextXAlignment.Left,
+    TextTruncate = Enum.TextTruncate.AtEnd,
+    ZIndex = 3
+}, mainFrame)
+local addShortcutButton = makeButton(mainFrame, "+ 快捷键", UDim2.fromOffset(104, 24), UDim2.new(1, -130, 1, -31), palette.locked, 11)
+addShortcutButton.ZIndex = 4
+addResizeGrip(mainFrame, 320, 280, function()
+    return 760
+end, function()
+    return 560
+end, 5)
+
+local function makeShortcutWindow(spec)
+    local code = keyCodeFromName(spec.code)
+    if not code then
+        return
+    end
+    shortcutCount = shortcutCount + 1
+    local vp = getViewport()
+    local width, height = 78, 82
+    local x = mainFrame.Position.X.Offset + mainFrame.AbsoluteSize.X + 12
+    local y = mainFrame.Position.Y.Offset + 12 + ((shortcutCount - 1) % 5) * 10
+    if x + width > vp.X - 6 then
+        x = math.max(6, mainFrame.Position.X.Offset - width - 12)
+    end
+    if x + width > vp.X - 6 then
+        x = math.max(6, vp.X - width - 6)
+    end
+    if y + height > vp.Y - 6 then
+        y = math.max(6, vp.Y - height - 6)
+    end
+    local locked = false
+    local window = make("Frame", {
+        Name = "Shortcut_" .. spec.code .. "_" .. shortcutCount,
+        BackgroundColor3 = palette.background,
+        BorderSizePixel = 0,
+        Size = UDim2.fromOffset(width, height),
+        Position = UDim2.fromOffset(x, y),
+        Active = true,
+        ZIndex = 10 + shortcutCount * 10
+    }, gui)
+    corner(window, 10)
+    outline(window, palette.stroke, 0.05, 1)
+    local top = make("Frame", {
+        BackgroundColor3 = palette.panel,
+        BorderSizePixel = 0,
+        Size = UDim2.new(1, 0, 0, 23),
+        ZIndex = window.ZIndex + 1
+    }, window)
+    corner(top, 8)
+    make("Frame", {
+        BackgroundColor3 = palette.panel,
+        BorderSizePixel = 0,
+        Position = UDim2.new(0, 0, 1, -7),
+        Size = UDim2.new(1, 0, 0, 7),
+        ZIndex = top.ZIndex
+    }, top)
+    local title = make("TextLabel", {
+        BackgroundTransparency = 1,
+        Position = UDim2.fromOffset(7, 0),
+        Size = UDim2.new(1, -36, 1, 0),
+        Font = Enum.Font.GothamBold,
+        Text = "KEY · " .. spec.text,
+        TextColor3 = palette.secondary,
+        TextSize = 9,
+        TextXAlignment = Enum.TextXAlignment.Left,
+        TextTruncate = Enum.TextTruncate.AtEnd,
+        ZIndex = top.ZIndex + 1
+    }, top)
+    bindDrag(title, window, function()
+        return locked
+    end)
+    local lockButton = makeButton(top, "固", UDim2.fromOffset(22, 19), UDim2.new(1, -25, 0, 2), palette.key, 10)
+    lockButton.ZIndex = top.ZIndex + 2
+    lockButton.Activated:Connect(function()
+        locked = not locked
+        lockButton.Text = locked and "锁" or "固"
+        lockButton:SetAttribute("Selected", locked)
+        lockButton.BackgroundColor3 = locked and palette.locked or palette.key
+    end)
+    local keyButton = make("TextButton", {
+        AutoButtonColor = false,
+        BackgroundColor3 = palette.key,
+        BorderSizePixel = 0,
+        Position = UDim2.fromOffset(5, 27),
+        Size = UDim2.new(1, -10, 1, -32),
+        Font = Enum.Font.GothamBold,
+        Text = spec.text,
+        TextColor3 = palette.text,
+        TextScaled = true,
+        TextSize = 24,
+        Active = true,
+        Selectable = false,
+        ZIndex = window.ZIndex + 1
+    }, window)
+    make("UITextSizeConstraint", {MinTextSize = 12, MaxTextSize = 30}, keyButton)
+    corner(keyButton, 8)
+    bindKeyButton(keyButton, code)
+    keyButton.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+            keyButton.BackgroundColor3 = palette.accent
+        end
+    end)
+    keyButton.InputEnded:Connect(function()
+        keyButton.BackgroundColor3 = palette.key
+    end)
+    addResizeGrip(window, 58, 62, function()
+        return 180
+    end, function()
+        return 180
+    end, window.ZIndex + 5)
+end
+
+local keyChoices = {}
+for _, letter in ipairs({"Q", "W", "E", "R", "T", "Y", "U", "I", "O", "P", "A", "S", "D", "F", "G", "H", "J", "K", "L", "Z", "X", "C", "V", "B", "N", "M"}) do
+    table.insert(keyChoices, keyDef(letter, letter))
+end
+for _, digit in ipairs({
+    {"1", "One"}, {"2", "Two"}, {"3", "Three"}, {"4", "Four"}, {"5", "Five"},
+    {"6", "Six"}, {"7", "Seven"}, {"8", "Eight"}, {"9", "Nine"}, {"0", "Zero"}
+}) do
+    table.insert(keyChoices, keyDef(digit[1], digit[2]))
+end
+for _, spec in ipairs({
+    keyDef("Esc", "Escape"), keyDef("Tab", "Tab"), keyDef("Enter", "Return"), keyDef("Bksp", "Backspace"),
+    keyDef("Space", "Space"), keyDef("Shift", "LeftShift"), keyDef("Ctrl", "LeftControl"), keyDef("Alt", "LeftAlt"),
+    keyDef("←", "Left"), keyDef("↓", "Down"), keyDef("↑", "Up"), keyDef("→", "Right"),
+    keyDef("-", "Minus"), keyDef("=", "Equals"), keyDef(",", "Comma"), keyDef(".", "Period"), keyDef("/", "Slash")
+}) do
+    table.insert(keyChoices, spec)
+end
+for number = 1, 12 do
+    table.insert(keyChoices, keyDef("F" .. number, "F" .. number))
+end
+
+local function openPicker()
+    if pickerFrame and pickerFrame.Parent then
+        pickerFrame:Destroy()
+        pickerFrame = nil
+        return
+    end
+    local vp = getViewport()
+    local width, height = 224, math.min(300, vp.Y - 20)
+    local x = math.clamp(mainFrame.Position.X.Offset + mainFrame.AbsoluteSize.X - width, 6, math.max(6, vp.X - width - 6))
+    local y = mainFrame.Position.Y.Offset - height - 8
+    if y < 6 then
+        y = math.min(vp.Y - height - 6, mainFrame.Position.Y.Offset + 42)
+    end
+    y = math.max(6, y)
+    pickerFrame = make("Frame", {
+        Name = "KeyPicker",
+        BackgroundColor3 = palette.background,
+        BorderSizePixel = 0,
+        Size = UDim2.fromOffset(width, height),
+        Position = UDim2.fromOffset(x, y),
+        Active = true,
+        ZIndex = 500
+    }, gui)
+    corner(pickerFrame, 10)
+    outline(pickerFrame, palette.stroke, 0.05, 1)
+    local pickerTitle = make("TextLabel", {
+        BackgroundTransparency = 1,
+        Position = UDim2.fromOffset(11, 0),
+        Size = UDim2.new(1, -48, 0, 36),
+        Font = Enum.Font.GothamBold,
+        Text = "选择要召唤的按键",
+        TextColor3 = palette.text,
+        TextSize = 12,
+        TextXAlignment = Enum.TextXAlignment.Left,
+        ZIndex = 501
+    }, pickerFrame)
+    local pickerClose = makeButton(pickerFrame, "×", UDim2.fromOffset(25, 24), UDim2.new(1, -31, 0, 6), palette.key, 15)
+    pickerClose.ZIndex = 502
+    pickerClose.Activated:Connect(function()
+        if pickerFrame then
+            pickerFrame:Destroy()
+            pickerFrame = nil
+        end
+    end)
+    local scroll = make("ScrollingFrame", {
+        BackgroundColor3 = palette.panel,
+        BorderSizePixel = 0,
+        Position = UDim2.fromOffset(8, 39),
+        Size = UDim2.new(1, -16, 1, -47),
+        CanvasSize = UDim2.fromOffset(0, 0),
+        ScrollBarThickness = 4,
+        ScrollBarImageColor3 = palette.secondary,
+        AutomaticCanvasSize = Enum.AutomaticSize.Y,
+        ScrollingDirection = Enum.ScrollingDirection.Y,
+        ZIndex = 501
+    }, pickerFrame)
+    corner(scroll, 8)
+    make("UIPadding", {
+        PaddingTop = UDim.new(0, 7),
+        PaddingBottom = UDim.new(0, 7),
+        PaddingLeft = UDim.new(0, 7),
+        PaddingRight = UDim.new(0, 7)
+    }, scroll)
+    make("UIGridLayout", {
+        CellSize = UDim2.fromOffset(45, 31),
+        CellPadding = UDim2.fromOffset(4, 5),
+        SortOrder = Enum.SortOrder.LayoutOrder
+    }, scroll)
+    for index, spec in ipairs(keyChoices) do
+        local code = keyCodeFromName(spec.code)
+        if code then
+            local button = makeButton(scroll, spec.text, UDim2.fromOffset(45, 31), UDim2.new(), palette.key, 11)
+            button.LayoutOrder = index
+            button.ZIndex = 502
+            button.Activated:Connect(function()
+                makeShortcutWindow(spec)
+                if pickerFrame then
+                    pickerFrame:Destroy()
+                    pickerFrame = nil
+                end
+            end)
+        end
+    end
+end
+
+addShortcutButton.Activated:Connect(openPicker)
+
+gui.Destroying:Connect(function()
+    currentDrag = nil
+    currentResize = nil
+    for input in pairs(activeInputs) do
+        endKey(input)
+    end
+    for keyCode, count in pairs(keyCounts) do
+        if count > 0 then
+            sendKey(keyCode, false)
+        end
+    end
+    table.clear(activeInputs)
+    table.clear(keyCounts)
+end)
